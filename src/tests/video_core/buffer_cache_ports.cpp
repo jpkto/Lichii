@@ -374,6 +374,10 @@ struct BufferCacheTestAccess {
     static size_t ReadDownloads(Cache& cache) {
         return cache.read_downloads.size();
     }
+    /// The early download limits.
+    static constexpr u32 MaxUnreadWrites = Cache::MaxUnreadWrites;
+    static constexpr u32 MaxPendingEarlyDownloads = Cache::MaxPendingEarlyDownloads;
+    static constexpr u64 EarlyBytesPerFrame = Cache::EarlyBytesPerFrame;
     /// Every read download compared with a synchronous flush (EDEN_NX2_READ_CHECK=1).
     static void CheckEveryRead(Cache& cache) {
         cache.read_check.every = 1;
@@ -1646,16 +1650,17 @@ TEST_CASE("Early downloads keep CPU writes, and stop for pages no longer read", 
     REQUIRE(f.bytes[0x10020] == 0xee);
     REQUIRE(f.bytes[0x1002f] == 0xee);
     REQUIRE(f.bytes[0x10030] == 3);
-    // Not read any more: a few more writes get early downloads, then none.
+    // Not read any more: MaxUnreadWrites more writes get early downloads, then none.
     const u32 queued = f.runtime.queued_host_reads;
-    for (u8 frame = 4; frame < 12; ++frame) {
-        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+    constexpr u32 writes = Access::MaxUnreadWrites + 4;
+    for (u32 write = 0; write < writes; ++write) {
+        WriteByDispatch(f, id, 0x20000, 0x100, static_cast<u8>(4 + write));
         f.runtime.Complete(f.runtime.submitted_tick);
     }
-    REQUIRE(f.runtime.queued_host_reads - queued == 4);
+    REQUIRE(f.runtime.queued_host_reads - queued == Access::MaxUnreadWrites);
     const auto area = ReadWord(f, 0x20010);
     REQUIRE_FALSE(area.preemtive);
-    REQUIRE(f.bytes[0x10010] == 11);
+    REQUIRE(f.bytes[0x10010] == static_cast<u8>(4 + writes - 1));
     REQUIRE(Access::ReadDownloads(*f.cache) == 0);
     REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
 }
@@ -1830,33 +1835,41 @@ TEST_CASE("Finished early downloads land a few draws later, or at the next dispa
     REQUIRE(ReadWord(f, 0x20010).preemtive);
 }
 
-TEST_CASE("Early downloads stop at 32 on their way", "[buffer_ports]") {
+TEST_CASE("Early downloads stop at MaxPendingEarlyDownloads on their way", "[buffer_ports]") {
     Fixture f;
     const Nx2TitleScope nx2_title;
     const auto id = Access::Add(*f.cache, 0x20000, 0x30000);
-    // 33 pages, each read after two writes.
+    // 9 pages, each read after two writes.
     for (u8 frame = 1; frame <= 2; ++frame) {
-        for (DAddr page = 0x20000; page < 0x41000; page += 0x1000) {
+        for (DAddr page = 0x20000; page < 0x29000; page += 0x1000) {
             WriteByDispatch(f, id, page, 0x100, frame);
             ReadWord(f, page);
         }
     }
-    // Their next writes before the host GPU ran any copy: the 33rd page's read flushes.
-    for (DAddr page = 0x20000; page < 0x41000; page += 0x1000) {
-        WriteByDispatch(f, id, page, 0x100, 3);
+    // Writes to the first 8 before the host GPU ran any copy, as many as may be on their way.
+    constexpr u32 rounds = Access::MaxPendingEarlyDownloads / 8;
+    static_assert(rounds * 8 == Access::MaxPendingEarlyDownloads);
+    static_assert(rounds <= Access::MaxUnreadWrites);
+    static_assert(Access::MaxPendingEarlyDownloads * u64{0x1000} < Access::EarlyBytesPerFrame);
+    for (u32 round = 0; round < rounds; ++round) {
+        for (DAddr page = 0x20000; page < 0x28000; page += 0x1000) {
+            WriteByDispatch(f, id, page, 0x100, static_cast<u8>(3 + round));
+        }
     }
-    REQUIRE(f.runtime.queued_host_reads == 32);
-    REQUIRE(Access::ReadDownloads(*f.cache) == 32);
-    const auto last = ReadWord(f, 0x40010);
+    // The 9th page's write gets none: its read flushes.
+    WriteByDispatch(f, id, 0x28000, 0x100, static_cast<u8>(3 + rounds));
+    REQUIRE(f.runtime.queued_host_reads == Access::MaxPendingEarlyDownloads);
+    REQUIRE(Access::ReadDownloads(*f.cache) == Access::MaxPendingEarlyDownloads);
+    const auto last = ReadWord(f, 0x28010);
     REQUIRE_FALSE(last.preemtive);
     REQUIRE_FALSE(last.in_flight);
-    REQUIRE(f.bytes[0x30010] == 3);
-    REQUIRE(f.bytes[0x10010] == 3);
+    REQUIRE(f.bytes[0x18010] == static_cast<u8>(3 + rounds));
+    REQUIRE(f.bytes[0x10010] == static_cast<u8>(3 + rounds - 1));
     REQUIRE(Access::ReadDownloads(*f.cache) == 0);
     REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x21000));
 }
 
-TEST_CASE("Early downloads stop at 1 MiB a frame", "[buffer_ports]") {
+TEST_CASE("Early downloads stop at EarlyBytesPerFrame a frame", "[buffer_ports]") {
     Fixture f;
     const Nx2TitleScope nx2_title;
     const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
@@ -1864,16 +1877,17 @@ TEST_CASE("Early downloads stop at 1 MiB a frame", "[buffer_ports]") {
         WriteByDispatch(f, id, 0x20000, 0x1000, frame);
         ReadWord(f, 0x20010);
     }
-    // A whole page each, read once the host GPU ran it: 256 make 1 MiB.
-    for (u32 write = 0; write < 256; ++write) {
+    // A whole page each, read once the host GPU ran it, up to the frame's bytes.
+    constexpr u32 writes = static_cast<u32>(Access::EarlyBytesPerFrame / 0x1000);
+    for (u32 write = 0; write < writes; ++write) {
         WriteByDispatch(f, id, 0x20000, 0x1000, static_cast<u8>(write));
         f.runtime.Complete(f.runtime.submitted_tick);
         REQUIRE(ReadWord(f, 0x20010).preemtive);
     }
-    REQUIRE(f.runtime.queued_host_reads == 256);
+    REQUIRE(f.runtime.queued_host_reads == writes);
     // The frame's later writes leave their reads to flush.
     WriteByDispatch(f, id, 0x20000, 0x1000, 0xab);
-    REQUIRE(f.runtime.queued_host_reads == 256);
+    REQUIRE(f.runtime.queued_host_reads == writes);
     const auto area = ReadWord(f, 0x20010);
     REQUIRE_FALSE(area.preemtive);
     REQUIRE_FALSE(area.in_flight);
