@@ -123,7 +123,22 @@ struct FrameState {
     /// The guest cores' host CPU clocks and the process's page faults at the last present.
     Common::DkbCpuTrace::Snapshot cpu{};
     u64 page_faults{};
+    /// EDEN_NX2_MAP_STATS's counters at the last present: guest map bytes, host view map and
+    /// unmap bytes, VirtualProtect calls.
+    std::array<u64, 4> memory{};
 };
+
+/// The EDEN_NX2_MAP_STATS counters the detail line gives per frame. They count only with the
+/// statistics on, and the 10 s report clears them: a counter below its last value restarted.
+std::array<u64, 4> ReadMemoryCounters() {
+    using Common::Nx2MapStats::Counter;
+    const auto get = [](Counter counter) {
+        return Common::Nx2MapStats::g_counters[static_cast<size_t>(counter)].load(
+            std::memory_order_relaxed);
+    };
+    return {get(Counter::SvcMapBytes), get(Counter::HostMapBytes), get(Counter::HostUnmapBytes),
+            get(Counter::VirtualProtects)};
+}
 
 FrameState g_frame;
 std::mutex g_cache_file_mutex;
@@ -359,6 +374,7 @@ void OnPresent() {
         std::exchange(state.cpu, Common::DkbCpuTrace::ReadSnapshot());
     const u64 last_page_faults =
         std::exchange(state.page_faults, Common::Nx2MapStats::PageFaultCount());
+    const std::array<u64, 4> last_memory = std::exchange(state.memory, ReadMemoryCounters());
     const u64 frame_start_ticks = state.last_ticks;
     const u64 interval_ns = now - state.last_ns;
     const u64 interval_ticks = now_ticks - state.last_ticks;
@@ -468,16 +484,25 @@ void OnPresent() {
             guest += fmt::format("{}{}:{:.1f}", guest.empty() ? "" : ",", name,
                                  static_cast<double>(*delta) / 1e6);
         }
+        const auto memory = [&state, &last_memory](size_t index) {
+            const u64 value = state.memory[index];
+            return value >= last_memory[index] ? value - last_memory[index] : value;
+        };
+        const auto mib = [&memory](size_t index) {
+            return static_cast<double>(memory(index)) / (1024.0 * 1024.0);
+        };
         LOG_INFO(HW_GPU,
                  "Nx2StutterDetail frame={} ms={:.1f} zones={} sites={} long={} guest_cpu_ms={} "
-                 "page_faults={}",
+                 "page_faults={} map_mib={:.1f} host_map_mib={:.1f} host_unmap_mib={:.1f} "
+                 "virtual_protects={}",
                  state.frames, interval_ms,
                  DetailZonesText(Difference(state.zone_ticks, last_zones),
                                  Difference(state.zone_counts, last_zone_counts), running,
                                  ms_per_tick),
                  sites.empty() ? "none" : sites, longest.empty() ? "none" : longest,
                  guest.empty() ? "none" : guest,
-                 state.page_faults - (std::min)(state.page_faults, last_page_faults));
+                 state.page_faults - (std::min)(state.page_faults, last_page_faults), mib(0),
+                 mib(1), mib(2), memory(3));
     }
     if (now - state.window_start_ns >= SummaryNs) {
         Summarize(state, now);
