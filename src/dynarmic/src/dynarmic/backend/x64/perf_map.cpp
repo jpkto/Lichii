@@ -97,8 +97,8 @@ namespace Dynarmic::Backend::X64 {
 
 // EDEN_NX2_JIT_MAP=<folder> (diagnostics): every compiled block as "start size name" in
 // <folder>/jit-map-<pid>.txt, like Linux's perf map, so a sampler's JIT addresses can be mapped
-// to the guest code they run. A cache clear writes a "# clear <n>" line instead of starting over:
-// samples taken before it then point at the blocks above it.
+// to the guest code they run. A JIT's cache clear writes "# clear <n> <begin> <end>" instead of
+// starting over: the blocks above it in [begin, end) are gone, the other JITs' blocks stay.
 namespace {
 std::mutex mutex;
 std::FILE* file = nullptr;
@@ -117,7 +117,7 @@ void OpenFile() {
 }  // anonymous namespace
 
 namespace detail {
-void PerfMapRegister(const void* start, const void* end, std::string_view friendly_name) {
+void JitMapRegister(const void* start, const void* end, std::string_view friendly_name) {
     if (start == end) {
         return;
     }
@@ -134,9 +134,8 @@ void PerfMapRegister(const void* start, const void* end, std::string_view friend
     std::fwrite(line.data(), sizeof *line.data(), line.size(), file);
     std::fflush(file);
 }
-}  // namespace detail
 
-bool PerfMapEnabled() noexcept {
+bool JitMapEnabled() noexcept {
     static const bool enabled = [] {
         const char* const folder = std::getenv("EDEN_NX2_JIT_MAP");
         return folder != nullptr && folder[0] != '\0';
@@ -144,15 +143,17 @@ bool PerfMapEnabled() noexcept {
     return enabled;
 }
 
-void PerfMapClear() {
+void JitMapClear(const void* begin, const void* end) {
     std::lock_guard guard{mutex};
     if (!file) {
         return;
     }
-    const std::string line = fmt::format("# clear {:d}\n", ++clears);
+    const std::string line = fmt::format("# clear {:d} {:016x} {:016x}\n", ++clears,
+                                         reinterpret_cast<u64>(begin), reinterpret_cast<u64>(end));
     std::fwrite(line.data(), sizeof *line.data(), line.size(), file);
     std::fflush(file);
 }
+}  // namespace detail
 
 }  // namespace Dynarmic::Backend::X64
 
