@@ -5130,11 +5130,13 @@ VkImageView ImageView::NullStorageView(Shader::TextureType texture_type,
         .baseArrayLayer = 0,
         .layerCount = layers,
     };
-    const VkImageMemoryBarrier barrier{
+    // Cleared to zero, what a load through a null descriptor returns. Stores through it stay in it
+    // (a null descriptor drops them), so later absent bindings of this format and type read them.
+    const VkImageMemoryBarrier to_general{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext = nullptr,
         .srcAccessMask = VK_ACCESS_NONE,
-        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -5142,11 +5144,27 @@ VkImageView ImageView::NullStorageView(Shader::TextureType texture_type,
         .image = image,
         .subresourceRange = range_all,
     };
+    const VkImageMemoryBarrier cleared{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = range_all,
+    };
     null_runtime->scheduler.RequestOutsideRenderPassOperationContext();
-    null_runtime->scheduler.Record([barrier](vk::CommandBuffer cmdbuf) {
-        cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
-                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, barrier);
-    });
+    null_runtime->scheduler.Record(
+        [to_general, cleared, image, range_all](vk::CommandBuffer cmdbuf) {
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, to_general);
+            cmdbuf.ClearColorImage(image, VK_IMAGE_LAYOUT_GENERAL, VkClearColorValue{}, range_all);
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, cleared);
+        });
     view = device->GetLogical().CreateImageView({
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .pNext = nullptr,
