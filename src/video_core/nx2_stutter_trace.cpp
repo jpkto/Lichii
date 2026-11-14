@@ -484,7 +484,7 @@ void OnPresent() {
             guest += fmt::format("{}{}:{:.1f}", guest.empty() ? "" : ",", name,
                                  static_cast<double>(*delta) / 1e6);
         }
-        const auto memory = [&state, &last_memory](size_t index) {
+        const auto memory = [&](size_t index) {
             const u64 value = state.memory[index];
             return value >= last_memory[index] ? value - last_memory[index] : value;
         };
