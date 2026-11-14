@@ -1147,9 +1147,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     // A table of handles the shader indexes (one shadow map per light, say), read
                     // in one go; elements repeating a sampler share its lookup. A pipeline with
                     // handle programs never takes the texture memo (texture_memo_eligible).
+                    // Index ~0U, a null handle's, has the null sampler.
                     const size_t first{views.size()};
                     u32 last_sampler_index{~0U};
-                    VideoCommon::SamplerId sampler{};
+                    VideoCommon::SamplerId sampler{VideoCommon::NULL_SAMPLER_ID};
                     VideoCommon::EvaluateTextureHandles(
                         info, desc.handle_program, *gpu_memory, cbuf_address,
                         device.GetStorageBufferAlignment(), desc.count,

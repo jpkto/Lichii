@@ -522,10 +522,10 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     for (const auto& desc : info.texture_descriptors) {
         if (desc.count > 1 && desc.handle_program != ~0U) {
             // A table of handles the shader indexes, read in one go; elements repeating a
-            // sampler share its lookup.
+            // sampler share its lookup. Index ~0U, a null handle's, has the null sampler.
             const size_t first{views.size()};
             u32 last_sampler_index{~0U};
-            VideoCommon::SamplerId sampler{};
+            VideoCommon::SamplerId sampler{VideoCommon::NULL_SAMPLER_ID};
             VideoCommon::EvaluateTextureHandles(
                 info, desc.handle_program, gpu_memory, cbuf_address,
                 device.GetStorageBufferAlignment(), desc.count, [&](u32, std::optional<u32> raw) {
