@@ -1307,14 +1307,21 @@ TEST_CASE("Split waits for a semaphore write's position, not for the work sent a
     f.system.Initialize();
     VideoCommon::GpuSplit split;
     std::array<std::atomic<bool>, 2> release{};
+    std::atomic<bool> done{};
+    bool waited{};
+    std::thread waiter;
     Access::Start(split, f.system);
     SCOPE_EXIT {
         split.Stop();
     };
-    // Runs before Stop: a failed check must not leave the back in the entries below.
+    // Runs before Stop: a failed check must not leave the back in the entries below or the waiter
+    // waiting.
     SCOPE_EXIT {
         release[0] = true;
         release[1] = true;
+        if (waiter.joinable()) {
+            waiter.join();
+        }
     };
     const auto blocking = [&split](std::atomic<bool>& flag) {
         split.Defer([&flag] {
@@ -1337,9 +1344,7 @@ TEST_CASE("Split waits for a semaphore write's position, not for the work sent a
     REQUIRE(queued.has_value());
     REQUIRE(queued->position == release_position);
     REQUIRE_FALSE(split.Ran(release_position));
-    std::atomic<bool> done{};
-    bool waited{};
-    std::thread waiter([&] {
+    waiter = std::thread([&, release_position] {
         waited = split.WaitForPosition(release_position, VideoCommon::DrainSite::Acquire);
         done = true;
     });

@@ -732,6 +732,7 @@ TEST_CASE("BackX ops: a filling thread and an emptying thread run every operatio
     std::mutex queue_guard;
     std::deque<OperationList> queue; // pending_operations
     std::atomic<bool> done{false};
+    std::atomic<bool> given{false};
     std::vector<u64> ran;
     u64 reused = 0;
     bool taken_not_empty = false; // Catch2 asserts on this thread only
@@ -750,6 +751,11 @@ TEST_CASE("BackX ops: a filling thread and an emptying thread run every operatio
                 queue.emplace_back(std::move(list));
             }
             list.clear();
+            // The first list is run and given back before the first Take: one list is reused
+            // however the threads are scheduled.
+            while (!given.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
             if (recycler.Take(list)) {
                 ++reused;
                 taken_not_empty |= !list.empty();
@@ -787,6 +793,7 @@ TEST_CASE("BackX ops: a filling thread and an emptying thread run every operatio
         recycler.Give(batch,
                       [](Released& released) -> OperationList& { return released.operations; });
         batch.clear();
+        given.store(true, std::memory_order_release);
     }
     filler.join();
     REQUIRE_FALSE(taken_not_empty);
