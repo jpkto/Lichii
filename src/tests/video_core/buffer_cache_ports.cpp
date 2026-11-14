@@ -13,6 +13,7 @@
 #include <mutex>
 #include <span>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -417,6 +418,15 @@ struct BufferCacheTestAccess {
     static void UpdateUniforms(Cache& cache, size_t stage) {
         cache.UpdateUniformBuffers(stage);
     }
+    /// A uniform buffer bind at stage 0 slot 0 of `channel`, through `memory`: the device
+    /// address it bound.
+    static DAddr BindUniform(Cache& cache, BufferCacheChannelInfo& channel,
+                             Tegra::MemoryManager& memory, GPUVAddr gpu_addr, u32 size) {
+        cache.channel_state = &channel;
+        cache.gpu_memory = &memory;
+        cache.BindGraphicsUniformBuffer(0, 0, gpu_addr, size);
+        return channel.uniform_buffers[0][0].device_addr;
+    }
 };
 
 } // namespace VideoCommon
@@ -433,6 +443,15 @@ struct ReadCheckScope {
         VideoCore::AsyncReadback::g_read_check_every = previous;
     }
     u64 previous;
+};
+
+/// EDEN_NX2_CFG_CBUF for a test, restored after it.
+struct CbufScope {
+    CbufScope() : previous{std::exchange(VideoCommon::Cfg::g_cbuf, true)} {}
+    ~CbufScope() {
+        VideoCommon::Cfg::g_cbuf = previous;
+    }
+    bool previous;
 };
 
 template <class R, class C>
@@ -725,6 +744,31 @@ TEST_CASE("Storage binding cache does not reuse a destroyed address space", "[bu
     REQUIRE(f.memory->MapSerial() == serial);
     REQUIRE(f.memory->GetID() != owner);
     REQUIRE(f.Bind(true).device_addr == 0x30000);
+}
+
+TEST_CASE("Uniform bind translations are not reused for a destroyed address space",
+          "[buffer_ports]") {
+    // EDEN_NX2_CFG_CBUF: the slot's last translation outlives the address space it was made in.
+    const CbufScope cbuf;
+    Fixture f;
+    constexpr GPUVAddr ubo = 0x200000;
+    // A channel on the address space there is now binds the uniform buffer.
+    const auto bind = [&f] {
+        Tegra::Control::ChannelState state{0};
+        state.memory_manager = &*f.memory;
+        state.payload.emplace(f.system, *f.memory, state);
+        VideoCommon::BufferCacheChannelInfo channel{state};
+        return Access::BindUniform(*f.cache, channel, *f.memory, ubo, 0x100);
+    };
+    f.memory->Map(ubo, 0x20000, 0x10000, Tegra::PTEKind::PITCH, true);
+    REQUIRE(bind() == 0x20000);
+    const auto serial = f.memory->MapSerial();
+    const auto* address = &*f.memory;
+    f.ResetMemory();
+    f.memory->Map(ubo, 0x30000, 0x10000, Tegra::PTEKind::PITCH, true);
+    REQUIRE(&*f.memory == address);
+    REQUIRE(f.memory->MapSerial() == serial);
+    REQUIRE(bind() == 0x30000);
 }
 
 TEST_CASE("Batch downloads clamp buffers, deduplicate pages and finish before publication",

@@ -717,8 +717,8 @@ TEST_CASE("Cfg: a reused translation is the page table's while the map serial ho
         const u64 reused_before =
             Cfg::g_counters.values[static_cast<size_t>(Cfg::Counter::VertexReused)];
         const Cfg::Translation got =
-            Cfg::Translated(memos[slot], &memory, serial, begin, end, Cfg::Counter::VertexReused,
-                            Cfg::Counter::VertexTranslated, [&] {
+            Cfg::Translated(memos[slot], memory.GetID(), serial, begin, end,
+                            Cfg::Counter::VertexReused, Cfg::Counter::VertexTranslated, [&] {
                                 return Cfg::Translation{memory.GpuToCpuAddress(begin),
                                                         static_cast<u32>(end - begin)};
                             });
@@ -736,18 +736,38 @@ TEST_CASE("Cfg: a reused translation is the page table's while the map serial ho
         const u64 begin = MockMemory::Base + 5 * MockMemory::PageSize + 8;
         memory.pages[5] = 77;
         const auto translate = [&] { return Cfg::Translation{memory.GpuToCpuAddress(begin), 0}; };
-        (void)Cfg::Translated(memo, &memory, serial, begin, 0, Cfg::Counter::CbufReused,
+        (void)Cfg::Translated(memo, memory.GetID(), serial, begin, 0, Cfg::Counter::CbufReused,
                               Cfg::Counter::CbufTranslated, translate);
         memory.pages[5] = 78; // a change without a new serial: what verify is there to catch
         const u64 mismatches_before = Cfg::g_mismatches_total.load();
         const Cfg::Translation got =
-            Cfg::Translated(memo, &memory, serial, begin, 0, Cfg::Counter::CbufReused,
+            Cfg::Translated(memo, memory.GetID(), serial, begin, 0, Cfg::Counter::CbufReused,
                             Cfg::Counter::CbufTranslated, translate);
         REQUIRE(got == translate());
         REQUIRE(Cfg::g_mismatches_total.load() == mismatches_before + 1);
         // The memo now holds the page table's answer.
-        REQUIRE(Cfg::Translated(memo, &memory, serial, begin, 0, Cfg::Counter::CbufReused,
+        REQUIRE(Cfg::Translated(memo, memory.GetID(), serial, begin, 0, Cfg::Counter::CbufReused,
                                 Cfg::Counter::CbufTranslated, translate) == translate());
         REQUIRE(Cfg::g_mismatches_total.load() == mismatches_before + 1);
+    }
+
+    SECTION("another address space at the same map serial translates again") {
+        // A later address space can take a destroyed one's place in memory and reach the same
+        // MapSerial; only its ID tells them apart.
+        Cfg::TranslationMemo memo{};
+        const u64 begin = MockMemory::Base + 7 * MockMemory::PageSize;
+        u64 translations = 0;
+        const auto translate = [&translations](u64 device_addr) {
+            return [&translations, device_addr] {
+                ++translations;
+                return Cfg::Translation{device_addr, 0};
+            };
+        };
+        (void)Cfg::Translated(memo, 1, serial, begin, 0, Cfg::Counter::CbufReused,
+                              Cfg::Counter::CbufTranslated, translate(0x40000));
+        REQUIRE(Cfg::Translated(memo, 2, serial, begin, 0, Cfg::Counter::CbufReused,
+                                Cfg::Counter::CbufTranslated, translate(0x41000))
+                    .first == 0x41000U);
+        REQUIRE(translations == 2);
     }
 }

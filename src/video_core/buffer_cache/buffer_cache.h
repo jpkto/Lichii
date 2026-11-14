@@ -1841,8 +1841,8 @@ void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr
     const std::optional<DAddr> device_addr =
         Cfg::g_cbuf && stage < NUM_STAGES && index < NUM_GRAPHICS_UNIFORM_BUFFERS
             ? Cfg::Translated(
-                  uniform_translations[stage][index], gpu_memory, gpu_memory->MapSerial(), gpu_addr,
-                  0, Cfg::Counter::CbufReused, Cfg::Counter::CbufTranslated,
+                  uniform_translations[stage][index], gpu_memory->GetID(), gpu_memory->MapSerial(),
+                  gpu_addr, 0, Cfg::Counter::CbufReused, Cfg::Counter::CbufTranslated,
                   [&] { return Cfg::Translation{gpu_memory->GpuToCpuAddress(gpu_addr), 0}; })
                   .first
             : gpu_memory->GpuToCpuAddress(gpu_addr);
@@ -3561,8 +3561,8 @@ void BufferCache<P>::UpdateIndexBuffer() {
     const std::optional<DAddr> device_addr =
         Cfg::g_vertex
             ? Cfg::Translated(
-                  index_translation, gpu_memory, gpu_memory->MapSerial(), gpu_addr_begin, 0,
-                  Cfg::Counter::IndexReused, Cfg::Counter::IndexTranslated,
+                  index_translation, gpu_memory->GetID(), gpu_memory->MapSerial(), gpu_addr_begin,
+                  0, Cfg::Counter::IndexReused, Cfg::Counter::IndexTranslated,
                   [&] { return Cfg::Translation{gpu_memory->GpuToCpuAddress(gpu_addr_begin), 0}; })
                   .first
             : gpu_memory->GpuToCpuAddress(gpu_addr_begin);
@@ -3626,8 +3626,9 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
             return;
         }
         const Cfg::Translation translation = Cfg::Translated(
-            vertex_translations[index], gpu_memory, gpu_memory->MapSerial(), gpu_addr_begin,
-            gpu_addr_end, Cfg::Counter::VertexReused, Cfg::Counter::VertexTranslated, [&] {
+            vertex_translations[index], gpu_memory->GetID(), gpu_memory->MapSerial(),
+            gpu_addr_begin, gpu_addr_end, Cfg::Counter::VertexReused,
+            Cfg::Counter::VertexTranslated, [&] {
                 const std::optional<DAddr> translated = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
                 u32 clamped = address_size;
                 if (translated &&

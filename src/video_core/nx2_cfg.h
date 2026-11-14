@@ -243,12 +243,14 @@ private:
 /// MemoryManager::PageTableOp and BigPageTableOp; each bumps MapSerial once it is done. So the
 /// translation of the same address in the same address space is the same while MapSerial is the
 /// one read before it was made. (An operation still running when MapSerial is read is a race the
-/// base has too: its translation may come before or after the change.)
+/// base has too: its translation may come before or after the change.) The address space is
+/// named by its GetID, which no other one gets: an address space made after one was destroyed
+/// may take its place in memory, and its MapSerial counts from 0 again.
 struct TranslationMemo {
-    const void* memory{}; ///< the address space (Tegra::MemoryManager) translated in
-    u64 map_serial{};     ///< its MapSerial, read before the translation
-    u64 gpu_begin{};      ///< the address translated
-    u64 gpu_end{};        ///< what else the result depends on (a vertex stream's end), else 0
+    std::size_t memory_id{}; ///< the address space (Tegra::MemoryManager::GetID) translated in
+    u64 map_serial{};        ///< its MapSerial, read before the translation
+    u64 gpu_begin{};         ///< the address translated
+    u64 gpu_end{};           ///< what else the result depends on (a vertex stream's end), else 0
     u64 device_addr{};
     u32 size{}; ///< a vertex stream's size after the continuous range clamp, else 0
     bool mapped{};
@@ -262,10 +264,10 @@ using Translation = std::pair<std::optional<u64>, u32>;
 /// MapSerial, address and end), else `translate()`, the base's computation, noted for next time.
 /// `map_serial` is to be read before the call. Verify makes the translation again and uses it.
 template <typename Translate>
-[[nodiscard]] Translation Translated(TranslationMemo& memo, const void* memory, u64 map_serial,
+[[nodiscard]] Translation Translated(TranslationMemo& memo, std::size_t memory_id, u64 map_serial,
                                      u64 gpu_begin, u64 gpu_end, Counter reused, Counter translated,
                                      Translate&& translate) {
-    if (memo.valid && memo.memory == memory && memo.map_serial == map_serial &&
+    if (memo.valid && memo.memory_id == memory_id && memo.map_serial == map_serial &&
         memo.gpu_begin == gpu_begin && memo.gpu_end == gpu_end) {
         const Translation kept{memo.mapped ? std::optional<u64>{memo.device_addr} : std::nullopt,
                                memo.size};
@@ -288,7 +290,7 @@ template <typename Translate>
     }
     const Translation result = translate();
     memo = TranslationMemo{
-        .memory = memory,
+        .memory_id = memory_id,
         .map_serial = map_serial,
         .gpu_begin = gpu_begin,
         .gpu_end = gpu_end,
