@@ -962,7 +962,12 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
                             VideoCommon::Nx2FastDraw::BreakUnsplit(
                                 VideoCommon::Nx2FastDraw::Reason::OtherEngine);
                         }
+                        // The register shadows hold what every method sent left, split or not: a
+                        // split started later places copies and uploads from them.
+                        const auto engine_type = subchannel_type[dma_state.subchannel];
                         for (u32 i = 0; i < batch_count; ++i) {
+                            ShadowEngineMethod(engine_type, dma_state.method + i,
+                                               commands[index + i].argument);
                             subchannel->method_sink.emplace_back(dma_state.method + i, commands[index + i].argument);
                         }
                         dma_state.method += batch_count;
