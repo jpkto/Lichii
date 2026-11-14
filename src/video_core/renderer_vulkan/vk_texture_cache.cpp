@@ -5000,6 +5000,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::NullImageV
 
     null_image = MakeImage(*device, runtime.memory_allocator, info, {});
     image_handle = *null_image;
+    null_runtime = &runtime;
     for (u32 i = 0; i < Shader::NUM_TEXTURE_TYPES; i++) {
         image_views[i] = MakeView(VK_FORMAT_A8B8G8R8_UNORM_PACK32, VK_IMAGE_ASPECT_COLOR_BIT);
     }
@@ -5048,8 +5049,8 @@ VkImageView ImageView::StorageView(Shader::TextureType texture_type,
         return VK_NULL_HANDLE;
     }
     if (null_image) {
-        // Devices without nullDescriptor own a fallback image for an absent guest texture.
-        return Handle(texture_type);
+        // Devices without nullDescriptor own fallback images for an absent guest texture.
+        return NullStorageView(texture_type, image_format);
     }
     if (is_byte_addressed &&
         (texture_type != Shader::TextureType::Color2D ||
@@ -5080,6 +5081,88 @@ VkImageView ImageView::StorageView(Shader::TextureType texture_type,
         return *view;
     }
     return VK_NULL_HANDLE;
+}
+
+VkImageView ImageView::NullStorageView(Shader::TextureType texture_type,
+                                       Shader::ImageFormat image_format) {
+    // Unlike a sampled one, a storage view must have the format the shader declares (a typeless
+    // one takes the null view's own) and its dimension: each one used gets an image of its own.
+    if (!storage_views) {
+        storage_views.emplace();
+    }
+    auto& view{storage_views->formats[static_cast<size_t>(image_format)]
+                                     [static_cast<size_t>(texture_type)]};
+    if (view) {
+        return *view;
+    }
+    const VkFormat vk_format{
+        image_format == Shader::ImageFormat::Typeless
+            ? MaxwellToVK::SurfaceFormat(*device, FormatType::Optimal, true, format).format
+            : Format(image_format)};
+    ImageInfo info{};
+    info.format = format;
+    u32 layers{1};
+    switch (texture_type) {
+    case Shader::TextureType::Color1D:
+    case Shader::TextureType::ColorArray1D:
+        info.type = ImageType::e1D;
+        break;
+    case Shader::TextureType::Color3D:
+        info.type = ImageType::e3D;
+        break;
+    case Shader::TextureType::ColorCube:
+    case Shader::TextureType::ColorArrayCube:
+        info.type = ImageType::e2D;
+        info.resources.layers = 6;
+        layers = 6;
+        break;
+    default:
+        info.type = ImageType::e2D;
+        break;
+    }
+    const VkImage image{*null_storage_images.emplace_back(
+        MakeImage(*device, null_runtime->memory_allocator, info, {}, vk_format))};
+    // Descriptors bind it in the general layout, as TransitionImageLayout leaves cache images.
+    const VkImageSubresourceRange range_all{
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = layers,
+    };
+    const VkImageMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_NONE,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = range_all,
+    };
+    null_runtime->scheduler.RequestOutsideRenderPassOperationContext();
+    null_runtime->scheduler.Record([barrier](vk::CommandBuffer cmdbuf) {
+        cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, barrier);
+    });
+    view = device->GetLogical().CreateImageView({
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .image = image,
+        .viewType = ImageViewType(texture_type),
+        .format = vk_format,
+        .components{
+            .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+        },
+        .subresourceRange = range_all,
+    });
+    return *view;
 }
 
 bool ImageView::IsRescaled() const noexcept {

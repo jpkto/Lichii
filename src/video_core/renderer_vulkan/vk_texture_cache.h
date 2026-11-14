@@ -984,6 +984,9 @@ private:
     [[nodiscard]] vk::ImageView MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask,
                                          std::optional<Shader::TextureType> texture_type = std::nullopt);
 
+    [[nodiscard]] VkImageView NullStorageView(Shader::TextureType texture_type,
+                                              Shader::ImageFormat image_format);
+
     const Device* device = nullptr;
     const SlotVector<Image>* slot_images = nullptr;
 
@@ -994,6 +997,9 @@ private:
     vk::ImageView stencil_view;
     vk::ImageView color_view;
     vk::Image null_image;
+    /// The null view without nullDescriptor: the images of its storage views (NullStorageView)
+    std::vector<vk::Image> null_storage_images;
+    TextureCacheRuntime* null_runtime = nullptr;
     VkImage image_handle = VK_NULL_HANDLE;
     VkImageView render_target = VK_NULL_HANDLE;
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
