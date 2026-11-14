@@ -168,10 +168,6 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     bool evict_old_costly = false;
     u64 ticks_to_destroy = 0;
     CollectionBudget collection_budget;
-    // More scans can add download work in a busy frame. Verify the starvation fix explicitly
-    // before changing the default policy.
-    static const bool scan_past_skips = std::getenv("EDEN_NX2_TC_SCAN_SKIPS") != nullptr;
-    collection_budget.scan_past_skips = scan_past_skips;
     const auto Configure = [&](bool allow_aggressive) {
         high_priority_mode = out_of_memory || total_used_memory >= expected_memory;
         aggressive_mode =
@@ -191,35 +187,60 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             collection_trace.aggressive += aggressive_mode ? 1 : 0;
         }
     };
-    const auto Cleanup = [this, &collection_budget, &high_priority_mode, &aggressive_mode,
-                          &evict_old_costly, out_of_memory](ImageId image_id) {
-        if (!collection_budget.Examine()) {
-            return true;
-        }
-        if (mem_trace_enabled) {
-            ++collection_trace.examined;
-        }
-        auto& image = slot_images[image_id];
-        if (True(image.flags & ImageFlagBits::IsDecoding)) {
+    // Whether this pass may delete the image. `examine`: the call examines a candidate, which
+    // uses scan work, and EDEN_NX2_MEM_TRACE counts why one is skipped.
+    const auto CanEvict = [this, &collection_budget, &high_priority_mode, &aggressive_mode,
+                           &evict_old_costly](ImageId image_id, bool examine,
+                                              bool* out_must_download = nullptr) {
+        if (examine) {
+            if (!collection_budget.Examine()) {
+                return false;
+            }
             if (mem_trace_enabled) {
+                ++collection_trace.examined;
+            }
+        }
+        const bool trace = examine && mem_trace_enabled;
+        const auto& image = slot_images[image_id];
+        if (True(image.flags & ImageFlagBits::IsDecoding)) {
+            if (trace) {
                 ++collection_trace.decoding;
             }
             return false;
         }
-        const bool must_download = IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
+        const bool must_download =
+            IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
+        if (out_must_download != nullptr) {
+            *out_must_download = must_download;
+        }
         if (!aggressive_mode && !evict_old_costly &&
             True(image.flags & ImageFlagBits::CostlyLoad)) {
-            if (mem_trace_enabled) {
+            if (trace) {
                 ++collection_trace.costly;
             }
             return false;
         }
         if (!high_priority_mode && must_download) {
-            if (mem_trace_enabled) {
+            if (trace) {
                 ++collection_trace.download_protected;
             }
             return false;
         }
+        return true;
+    };
+    // Where images have memory blocks, Collect examines the candidates; elsewhere Cleanup does.
+    static constexpr bool cleanup_examines = !requires(const Image& img) { img.MemoryBlock(); };
+    const auto Cleanup = [this, &collection_budget, &high_priority_mode, &aggressive_mode,
+                          &CanEvict, out_of_memory](ImageId image_id) {
+        if (collection_budget.deletions == 0 ||
+            (cleanup_examines && collection_budget.scans == 0)) {
+            return true;
+        }
+        bool must_download = false;
+        if (!CanEvict(image_id, cleanup_examines, &must_download)) {
+            return false;
+        }
+        auto& image = slot_images[image_id];
         OotWhiteout::Add(
             must_download ? OotWhiteout::Event::CollectDownload : OotWhiteout::Event::CollectDrop,
             image.gpu_addr, image.cpu_addr, image.guest_size_bytes, static_cast<u64>(image.flags));
@@ -241,6 +262,15 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         }
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, image_id);
+        }
+        if constexpr (requires(const Image& img) { img.MemoryBlock(); }) {
+            const auto block = image.MemoryBlock();
+            if (block.block != 0) {
+                const auto it = block_image_bytes.find(block.block);
+                if (it != block_image_bytes.end()) {
+                    it->second -= (std::min)(it->second, block.size);
+                }
+            }
         }
         ++(True(image.flags & ImageFlagBits::CostlyLoad) ? gc_costly_deletes : gc_deletes);
         collection_budget.Deleted();
@@ -268,22 +298,22 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     // used). Among the oldest candidates (8 per image this pass may delete), those in the
     // emptiest blocks go first, so blocks drain and go back to the driver; placement already
     // prefers the fullest blocks (best fit). Images with memory of their own sit in the middle.
-    const auto Collect = [&] {
-        if (frame_tick < ticks_to_destroy) {
+    const auto Collect = [&](u64 age_override = 0) {
+        const u64 required_age = age_override != 0 ? age_override : ticks_to_destroy;
+        if (collection_budget.deletions == 0 || frame_tick < required_age) {
             return;
         }
-        const u64 last_tick = frame_tick - ticks_to_destroy;
+        const u64 last_tick = frame_tick - required_age;
         if constexpr (requires(const Image& image) { image.MemoryBlock(); }) {
             std::vector<ImageId> candidates;
-            const size_t limit = collection_budget.scan_past_skips
-                                     ? collection_budget.scans
-                                     : collection_budget.deletions * 8;
-            if (limit == 0 || collection_budget.deletions == 0) {
-                return;
-            }
             lru_cache.ForEachItemBelow(last_tick, [&](ImageId image_id) {
-                candidates.push_back(image_id);
-                return candidates.size() >= limit;
+                if (collection_budget.scans == 0) {
+                    return true;
+                }
+                if (CanEvict(image_id, true)) {
+                    candidates.push_back(image_id);
+                }
+                return false;
             });
             if (candidates.empty()) {
                 if (mem_trace_enabled) {
@@ -332,7 +362,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     }();
     if (high_priority_mode && old_age != 0 && frame_tick > old_age) {
         evict_old_costly = true;
-        lru_cache.ForEachItemBelow(frame_tick - old_age, Cleanup);
+        Collect(old_age);
         evict_old_costly = false;
     }
     Collect();

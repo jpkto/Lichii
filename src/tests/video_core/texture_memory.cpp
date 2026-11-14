@@ -28,13 +28,12 @@ struct CollectionResult {
 };
 
 // Use the collector's real LRU and budget, with the same skip-before-delete callback order.
-CollectionResult Collect(size_t protected_count, size_t eligible_count, bool scan_skips) {
+CollectionResult Collect(size_t protected_count, size_t eligible_count) {
     Common::LeastRecentlyUsedCache<LruTraits> lru;
     for (size_t i = 0; i < protected_count + eligible_count; ++i) {
         lru.Insert(i, 10);
     }
     CollectionBudget budget;
-    budget.scan_past_skips = scan_skips;
     budget.Configure(40);
     CollectionResult result;
     lru.ForEachItemBelow(20, [&](size_t image) {
@@ -83,19 +82,17 @@ TEST_CASE("Null texture slots cannot become framebuffer attachments",
 
 TEST_CASE("Collection reaches an eligible image behind forty decoding images",
           "[video_core][texture_memory]") {
-    const auto legacy = Collect(40, 1, false);
-    CHECK(legacy.deleted == 0);
-    const auto result = Collect(40, 1, true);
+    const auto result = Collect(40, 1);
     CHECK(result.examined == 41);
     CHECK(result.deleted == 1);
 }
 
 TEST_CASE("Collection remains bounded by scans and successful deletions",
           "[video_core][texture_memory]") {
-    const auto protected_result = Collect(400, 1, true);
+    const auto protected_result = Collect(400, 1);
     CHECK(protected_result.examined == 320);
     CHECK(protected_result.deleted == 0);
-    const auto eligible_result = Collect(5, 400, true);
+    const auto eligible_result = Collect(5, 400);
     CHECK(eligible_result.examined == 45);
     CHECK(eligible_result.deleted == 40);
 }
