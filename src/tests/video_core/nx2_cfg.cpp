@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -21,6 +22,7 @@
 #include "common/slot_vector.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/nx2_cfg.h"
+#include "video_core/nx2_tested.h"
 #include "video_core/texture_cache/descriptor_table.h"
 
 namespace {
@@ -66,6 +68,30 @@ std::vector<u32> Contents(Lru& lru) {
 }
 
 } // Anonymous namespace
+
+TEST_CASE("Cfg: a switch read through Nx2Tested is on only when set to exactly 1",
+          "[video_core][nx2_cfg]") {
+    constexpr const char* name = "EDEN_NX2_TESTED_SWITCH_TEST";
+    const auto on = [&](const char* value) {
+#ifdef _WIN32
+        _putenv_s(name, value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv(name, value, 1);
+        } else {
+            unsetenv(name);
+        }
+#endif
+        return VideoCommon::Nx2Tested::On(name);
+    };
+    // Unset, off outside the tested title (no title runs here).
+    CHECK_FALSE(on(nullptr));
+    CHECK(on("1"));
+    CHECK_FALSE(on("0"));
+    CHECK_FALSE(on("10"));
+    CHECK_FALSE(on("1false"));
+    on(nullptr);
+}
 
 TEST_CASE("Cfg: skipped LRU touches leave the cache as every touch does", "[video_core][nx2_cfg]") {
     SwitchScope touch{Cfg::g_touch, true};

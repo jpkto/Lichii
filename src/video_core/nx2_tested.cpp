@@ -20,7 +20,7 @@ bool TestedTitle() {
 
 bool On(const char* name) {
     const char* const value = std::getenv(name);
-    return value != nullptr ? value[0] == '1' : TestedTitle();
+    return value != nullptr ? value[0] == '1' && value[1] == '\0' : TestedTitle();
 }
 
 } // namespace VideoCommon::Nx2Tested
