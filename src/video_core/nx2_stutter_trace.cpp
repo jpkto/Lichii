@@ -20,7 +20,9 @@
 #include <fstream>
 #endif
 
+#include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
+#include "common/nx2_map_stats.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stutter_trace.h"
 
@@ -118,6 +120,9 @@ struct FrameState {
     u64 window_compute_builds{};
     std::array<u64, LookupCount> lookups{};
     std::array<u64, DriverBuildCount> driver_builds{};
+    /// The guest cores' host CPU clocks and the process's page faults at the last present.
+    Common::DkbCpuTrace::Snapshot cpu{};
+    u64 page_faults{};
 };
 
 FrameState g_frame;
@@ -348,6 +353,12 @@ void OnPresent() {
     }
     const auto last_site_ticks = std::exchange(state.site_ticks, site_ticks);
     const auto last_site_counts = std::exchange(state.site_counts, site_counts);
+    // A slow frame with idle GPU threads went to the guest: its cores' CPU time tells the game's
+    // own work from a wait, the page faults a fault storm (trimmed or protected pages).
+    const Common::DkbCpuTrace::Snapshot last_cpu =
+        std::exchange(state.cpu, Common::DkbCpuTrace::ReadSnapshot());
+    const u64 last_page_faults =
+        std::exchange(state.page_faults, Common::Nx2MapStats::PageFaultCount());
     const u64 frame_start_ticks = state.last_ticks;
     const u64 interval_ns = now - state.last_ns;
     const u64 interval_ticks = now_ticks - state.last_ticks;
@@ -444,12 +455,29 @@ void OnPresent() {
                                    site_names[static_cast<size_t>(site.site)],
                                    static_cast<double>(site.end - site.start) * ms_per_tick);
         }
-        LOG_INFO(HW_GPU, "Nx2StutterDetail frame={} ms={:.1f} zones={} sites={} long={}",
+        std::string guest;
+        for (size_t index = 0; index <= Common::DkbCpuTrace::GuestCoreCount; ++index) {
+            const auto delta = Common::DkbCpuTrace::CpuTimeDelta(last_cpu.threads[index],
+                                                                 state.cpu.threads[index]);
+            if (!delta) {
+                continue;
+            }
+            const std::string name = index < Common::DkbCpuTrace::GuestCoreCount
+                                         ? fmt::format("c{}", index)
+                                         : std::string{"single"};
+            guest += fmt::format("{}{}:{:.1f}", guest.empty() ? "" : ",", name,
+                                 static_cast<double>(*delta) / 1e6);
+        }
+        LOG_INFO(HW_GPU,
+                 "Nx2StutterDetail frame={} ms={:.1f} zones={} sites={} long={} guest_cpu_ms={} "
+                 "page_faults={}",
                  state.frames, interval_ms,
                  DetailZonesText(Difference(state.zone_ticks, last_zones),
                                  Difference(state.zone_counts, last_zone_counts), running,
                                  ms_per_tick),
-                 sites.empty() ? "none" : sites, longest.empty() ? "none" : longest);
+                 sites.empty() ? "none" : sites, longest.empty() ? "none" : longest,
+                 guest.empty() ? "none" : guest,
+                 state.page_faults - (std::min)(state.page_faults, last_page_faults));
     }
     if (now - state.window_start_ns >= SummaryNs) {
         Summarize(state, now);
