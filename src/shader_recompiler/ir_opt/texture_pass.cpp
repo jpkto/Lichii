@@ -17,6 +17,7 @@
 #include <limits>
 #include <boost/container/small_vector.hpp>
 
+#include "common/hash.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -484,6 +485,12 @@ static inline u32 ReadCbufCached(Environment& env, u32 index, u32 offset) {
 }
 
 static inline u32 GetTextureHandleCached(Environment& env, const ConstBufferAddr& cbuf) {
+    if (cbuf.has_handle_metadata && !cbuf.has_secondary) {
+        // A computed handle's single word (see MakeInst): the handle is the word shifted, not the
+        // word merged with itself unshifted as below, whose cache key it would share.
+        const u32 word = ReadCbufCached(env, cbuf.index, cbuf.offset);
+        return cbuf.shift_left < 32 ? word << cbuf.shift_left : 0U;
+    }
     // Must all be uniquely different variables
     // If has secondary, then it will be cbuf.secondary_{index|offset}, else its 0.
     // So we can just hand it out the raw variable without using sec_idx or sec_off
@@ -688,7 +695,12 @@ thread_local int g_handle_scaled{};
 
 thread_local bool g_handle_loads_stable{};
 
-bool SameHandleExpression(IR::Value lhs, IR::Value rhs, u32 depth = 0) {
+// Pairs of distinct instructions SameHandleExpression found equal, each with the deepest level it
+// compared them at: from there or any shallower level they compare equal again.
+using HandlePairDepths =
+    std::unordered_map<std::pair<const IR::Inst*, const IR::Inst*>, u32, Common::PairHash>;
+
+bool SameHandleExpression(IR::Value lhs, IR::Value rhs, HandlePairDepths& equal, u32 depth) {
     lhs = lhs.Resolve();
     rhs = rhs.Resolve();
     if (lhs == rhs)
@@ -697,6 +709,10 @@ bool SameHandleExpression(IR::Value lhs, IR::Value rhs, u32 depth = 0) {
         return false;
     const IR::Inst* const left = lhs.InstRecursive();
     const IR::Inst* const right = rhs.InstRecursive();
+    // A value the expressions reuse is compared once, not once for each path to it (which doubles
+    // with each reuse), unless reached deeper, where the depth limit can end the comparison.
+    if (const auto it = equal.find({left, right}); it != equal.end() && it->second >= depth)
+        return true;
     if (left->GetOpcode() != right->GetOpcode() || left->Flags<u32>() != right->Flags<u32>() ||
         left->NumArgs() != right->NumArgs() || left->GetOpcode() == IR::Opcode::Phi ||
         left->MayHaveSideEffects())
@@ -708,10 +724,16 @@ bool SameHandleExpression(IR::Value lhs, IR::Value rhs, u32 depth = 0) {
             return false;
     }
     for (size_t arg = 0; arg < left->NumArgs(); ++arg) {
-        if (!SameHandleExpression(left->Arg(arg), right->Arg(arg), depth + 1))
+        if (!SameHandleExpression(left->Arg(arg), right->Arg(arg), equal, depth + 1))
             return false;
     }
+    equal[{left, right}] = depth;
     return true;
+}
+
+bool SameHandleExpression(IR::Value lhs, IR::Value rhs) {
+    HandlePairDepths equal;
+    return SameHandleExpression(lhs, rhs, equal, 0);
 }
 
 bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget,
@@ -1459,10 +1481,13 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
     bool pointer_word{};
     if (IsBindless(inst)) {
         std::optional<ConstBufferAddr> track_addr{TrackCached(inst.Arg(0), env, host_info, block)};
+        std::optional<ConstBufferAddr> shifted_word;
         if (StrictHandles && track_addr && !track_addr->has_secondary &&
             track_addr->shift_left != 0) {
-            // Single-word descriptors are read without a shift by the renderers.
-            track_addr.reset();
+            // Single-word descriptors are read without a shift by the renderers. The word with
+            // all its shifts is the handle the program below computes, and its metadata (the
+            // legacy search keeps only the last shift).
+            shifted_word = std::exchange(track_addr, std::nullopt);
         }
 
         if (track_addr) {
@@ -1610,14 +1635,14 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                     .has_secondary = false,
                     .handle_program = static_cast<u32>(it - programs.begin()),
                 };
-                if (legacy_metadata) {
-                    addr.index = legacy_metadata->index;
-                    addr.offset = legacy_metadata->offset;
-                    addr.shift_left = legacy_metadata->shift_left;
-                    addr.secondary_index = legacy_metadata->secondary_index;
-                    addr.secondary_offset = legacy_metadata->secondary_offset;
-                    addr.secondary_shift_left = legacy_metadata->secondary_shift_left;
-                    addr.has_secondary = legacy_metadata->has_secondary;
+                if (const auto metadata = shifted_word ? shifted_word : legacy_metadata) {
+                    addr.index = metadata->index;
+                    addr.offset = metadata->offset;
+                    addr.shift_left = metadata->shift_left;
+                    addr.secondary_index = metadata->secondary_index;
+                    addr.secondary_offset = metadata->secondary_offset;
+                    addr.secondary_shift_left = metadata->secondary_shift_left;
+                    addr.has_secondary = metadata->has_secondary;
                     addr.has_handle_metadata = true;
                 }
             }

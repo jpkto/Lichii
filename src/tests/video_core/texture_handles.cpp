@@ -1061,7 +1061,8 @@ TEST_CASE("Nested handle shifts preserve default binding and strict evaluation",
     const Value first{shader.Emit(Opcode::ShiftLeftLogical32, {word, Value{2U}})};
     const Value second{shader.Emit(Opcode::ShiftLeftLogical32, {first, Value{3U}})};
     auto& sample{shader.Sample(second)};
-    shader.env.expected_handle = 0x5ffcU;
+    // Strict: the format is read for the handle the program computes, with both shifts.
+    shader.env.expected_handle = Shader::StrictHandles ? 0x15780U : 0x5ffcU;
     shader.Run();
     const auto& descriptor{shader.Descriptor(sample)};
     if (!Shader::StrictHandles) {
@@ -1420,6 +1421,41 @@ TEST_CASE("Phi handle equality checks complete computations", "[video_core][text
     }
 }
 
+TEST_CASE("Phi handle equality compares each reused value once",
+          "[video_core][texture_handles]") {
+    // Each arm squares the word 48 times: compared once for each path to the word, the arms would
+    // take 2^48 comparisons.
+    constexpr u32 levels = 48;
+    HandleProgram shader;
+    shader.env.cbuf_values = {{{0, 0}, 0xabdU}};
+    shader.env.expected_handle = 0xabdU;
+    const Value word = shader.Emit(Opcode::GetCbufU32, {Value{0U}, Value{0U}});
+    std::array<Value, 2> arms;
+    for (size_t arm = 0; arm < arms.size(); ++arm) {
+        shader.insertion_block = arm == 0 ? &shader.left : &shader.right;
+        arms[arm] = word;
+        for (u32 level = 0; level < levels; ++level) {
+            arms[arm] = shader.Emit(Opcode::IMul32, {arms[arm], arms[arm]});
+        }
+    }
+    auto& sample = shader.Sample(shader.Phi(arms[0], arms[1]));
+    shader.Run();
+    const auto& desc = shader.Descriptor(sample);
+    CHECK_FALSE(desc.bind_null);
+    if (!Shader::StrictHandles) {
+        CHECK(desc.handle_program == ~0U);
+        return;
+    }
+    REQUIRE(desc.handle_program < shader.program.info.handle_programs.size());
+    u32 expected = 0xabdU;
+    for (u32 level = 0; level < levels; ++level) {
+        expected *= expected;
+    }
+    CHECK(Shader::EvaluateHandleProgram(shader.program.info.handle_programs[desc.handle_program],
+                                        [](u32, u32) { return 0xabdU; },
+                                        [](u32, u32) { return 0U; }) == expected);
+}
+
 TEST_CASE("Review19 masks and single shifts retain legacy descriptors by default",
           "[video_core][texture_handles]") {
     for (u32 shape = 0; shape < 6; ++shape) {
@@ -1446,7 +1482,10 @@ TEST_CASE("Review19 masks and single shifts retain legacy descriptors by default
             const Value shifted = shader.Emit(Opcode::ShiftLeftLogical32, {second, Value{20U}});
             handle = shader.Emit(Opcode::BitwiseOr32, {first, shifted});
         }
-        shader.env.expected_handle = shape == 0 ? 0x00300005U : shape == 4 ? 85U : 5U;
+        // Strict: a single shifted word is read as the handle the program computes (80).
+        shader.env.expected_handle = shape == 0   ? 0x00300005U
+                                     : shape == 4 ? (Shader::StrictHandles ? 80U : 85U)
+                                                  : 5U;
         IR::IREmitter ir{shader.block};
         auto& query = *ir.ImageQueryDimension(handle, ir.Imm32(0U), ir.Imm1(false)).Inst();
         shader.Run();
