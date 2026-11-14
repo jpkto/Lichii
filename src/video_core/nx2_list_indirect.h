@@ -67,11 +67,14 @@ static_assert((SlotCount << 2) <= 0x10000);
 [[nodiscard]] constexpr u32 Placeholder(u32 slot, u32 word) {
     return PlaceholderMagic | (slot << 2) | word;
 }
-[[nodiscard]] constexpr bool IsPlaceholder(u32 value) {
-    return (value & 0xFFFF0000U) == PlaceholderMagic && (value & 3) < SlotWords;
-}
 [[nodiscard]] constexpr u32 PlaceholderSlot(u32 value) {
     return (value & 0xFFFFU) >> 2;
+}
+/// The guest can write any word where placeholders go (a QMD's grid): one with the magic that
+/// names a slot past the last is none (the back indexes its holds and its slots by the slot).
+[[nodiscard]] constexpr bool IsPlaceholder(u32 value) {
+    return (value & 0xFFFF0000U) == PlaceholderMagic && (value & 3) < SlotWords &&
+           PlaceholderSlot(value) < SlotCount;
 }
 [[nodiscard]] constexpr u32 PlaceholderWord(u32 value) {
     return value & 3;
@@ -1125,6 +1128,19 @@ class ComputeFront {
         const auto release = [&ctx](u32 slot) {
             ctx.Release(slot);
         };
+        // The slots the run writes list words of stay held until it is applied: a write over a
+        // slot's last holder (the stores go before the emits) must not give the slot back to
+        // the back while a later write holds it again.
+        committing.clear();
+        const auto keep = [this](const TaggedWrite& write) {
+            if (write.tagged &&
+                std::ranges::find(committing, PlaceholderSlot(write.value)) == committing.end()) {
+                committing.push_back(PlaceholderSlot(write.value));
+                ++FrontHolds()[committing.back()];
+            }
+        };
+        std::ranges::for_each(run.data_ram, keep);
+        std::ranges::for_each(run.emits, keep);
         for (const TaggedWrite& store : run.data_ram) {
             ctx.data_ram[store.address] = store.value;
             Hold(channel.words, store.address, store.value, store.tagged, release);
@@ -1139,6 +1155,9 @@ class ComputeFront {
                 Hold(registers, emit.address, emit.value, emit.tagged, release);
             }
         }
+        for (const u32 slot : committing) {
+            DropHold(slot, release);
+        }
     }
 
     std::vector<Holder> registers;
@@ -1147,6 +1166,7 @@ class ComputeFront {
     std::vector<TuringMacroInterpreter::Decoded> decoded;
     std::vector<u8> params_tagged;
     std::vector<u64> owed;
+    std::vector<u32> committing; ///< The slots Commit holds while it applies a run
     Reason place_reason{};
 };
 
