@@ -200,6 +200,8 @@ private:
     void WakeHeldWorkers();
     bool BackgroundStageAllowed(bool driver);
     void EndStage(ShaderJobState& job);
+    /// The job's queued entry goes stale without its stage starting: cancelled or promoted.
+    void QueuedEntryDropped(const ShaderJobState& job);
 
     const u64 budget;
     const std::chrono::nanoseconds background_aging;

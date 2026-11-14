@@ -242,6 +242,7 @@ void ShaderJobScheduler::Promote(const ShaderJobHandle& handle, ShaderJobPriorit
         return;
     }
     const bool driver{status == ShaderJobStatus::DriverQueued};
+    QueuedEntryDropped(job);
     job.queued_priority = priority;
     (driver ? driver_queue : cpu_queue)[Index(priority)].push_back(handle.state);
     // A worker the budget holds back may now take it.
@@ -359,7 +360,8 @@ ShaderJobScheduler::JobPtr ShaderJobScheduler::Pick(bool driver, Clock::time_poi
         std::deque<JobPtr>* const soon{front(ShaderJobPriority::Soon)};
         std::deque<JobPtr>* background{front(ShaderJobPriority::Background)};
         if (background && !BackgroundStageAllowed(driver)) {
-            background = nullptr; // EndStage wakes the workers again
+            // EndStage, StartStage or QueuedEntryDropped wakes the workers again
+            background = nullptr;
         }
         // An aged Background job ahead of the Soon jobs takes every other pick, so a backlog
         // doesn't hold back the Soon jobs submitted after it.
@@ -446,6 +448,15 @@ void ShaderJobScheduler::EndStage(ShaderJobState& job) {
     }
 }
 
+void ShaderJobScheduler::QueuedEntryDropped(const ShaderJobState& job) {
+    if (max_background_stages != 0 && job.status.load() == ShaderJobStatus::DriverQueued &&
+        job.queued_priority == ShaderJobPriority::Background) {
+        // The CPU workers may have left the Background jobs alone while it waited for its driver
+        // stage (BackgroundStageAllowed), and no Background stage of it follows to wake them.
+        cpu_condition.notify_all();
+    }
+}
+
 void ShaderJobScheduler::RunCpu(const JobPtr& job, bool run_driver_here) {
     ShaderDriverStage driver;
     std::exception_ptr exception;
@@ -529,6 +540,7 @@ void ShaderJobScheduler::Finish(ShaderJobState& job, ShaderJobStatus status,
     auto& counters{stats.priorities[Index(job.priority.load())]};
     if (IsQueued(job.status.load())) {
         --counters.queued;
+        QueuedEntryDropped(job);
     } else {
         --counters.running;
     }
